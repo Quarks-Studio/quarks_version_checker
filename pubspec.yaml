@@ -1,6 +1,6 @@
 name: quarks_version_checker
 description: Detector automático de nuevas versiones para Flutter Web. By Quarks Studio.
-version: 1.0.0
+version: 1.1.0
 homepage: https://quarks-studio.com
 repository: https://github.com/quarks-studio/quarks_version_checker
 
