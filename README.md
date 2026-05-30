@@ -4,12 +4,18 @@ Detector automático de nuevas versiones para Flutter Web. Cuando hacés un nuev
 
 Hecho por [Quarks Studio](https://quarks-studio.com).
 
+---
+
 ## Cómo funciona
 
 1. La librería compara la versión local del bundle con un `version.json` que servís junto a tu app.
 2. Si detecta una versión nueva, espera a un **momento seguro** — cuando el usuario cambia de pestaña — y recarga.
 3. Antes de recargar, desregistra el service worker para garantizar que se baje el bundle nuevo (no la versión cacheada).
 4. Opcionalmente podés ejecutar un hook (`onBeforeReload`) para guardar borradores o cancelar la recarga si el usuario tiene cambios sin guardar.
+
+> **Nota:** Cada vez que el paquete consulta `version.json`, agrega automáticamente un timestamp a la URL (`?t=...`). Esto garantiza que el service worker nunca sirva una versión cacheada del archivo — no necesitás configurar nada extra para esto.
+
+---
 
 ## Uso básico
 
@@ -18,12 +24,17 @@ import 'package:quarks_version_checker/quarks_version_checker.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  AppVersionChecker.instance.versionUrl = '/version.json'; // default, podés cambiarlo
+
   await AppVersionChecker.instance.start();
   runApp(const MyApp());
 }
 ```
 
 Listo. La app se actualiza sola cuando hay deploy nuevo.
+
+---
 
 ## Generar `version.json` en cada build
 
@@ -36,10 +47,12 @@ VERSION_LINE=$(grep '^version:' pubspec.yaml | sed 's/version: //' | tr -d ' ')
 VERSION="${VERSION_LINE%+*}"
 BUILD="${VERSION_LINE#*+}"
 
-cat > build/web/version.json <<EOF
-{ "version": "$VERSION", "build_number": "$BUILD" }
-EOF
+printf '{"version":"%s","build_number":"%s"}' "$VERSION" "$BUILD" > build/web/version.json
 ```
+
+> **Tip:** Usá `printf` en lugar de `cat <<EOF` para evitar problemas con espacios y saltos de línea que generan JSON malformado en algunos entornos.
+
+---
 
 ## Hook `onBeforeReload`
 
@@ -78,6 +91,8 @@ AppVersionChecker.instance.onBeforeReload = () async {
 
 Si devolvés `false` la recarga se cancela y se vuelve a intentar en el próximo cambio de pestaña.
 
+---
+
 ## Banner manual (opcional)
 
 Si preferís mostrar un cartel y dejar que el usuario decida cuándo actualizar, desactivá el auto-reload y usá el `UpdateBanner`:
@@ -91,6 +106,8 @@ MaterialApp(
 );
 ```
 
+---
+
 ## Configuración
 
 ```dart
@@ -98,15 +115,21 @@ final checker = AppVersionChecker.instance;
 
 checker.checkInterval = const Duration(minutes: 5);  // cada cuánto pollear
 checker.versionUrl = '/version.json';                // path al endpoint
-checker.autoReload = true;                           // reload en cambio de foco
-checker.reloadImmediately = false;                   // reload sin esperar foco
-checker.unregisterServiceWorker = true;              // desregistrar SW pre-reload
+checker.autoReload = true;                           // reload automático al cambiar de foco
+checker.reloadImmediately = false;                   // reload sin esperar cambio de foco
+checker.unregisterServiceWorker = true;              // desregistrar SW antes del reload
 checker.onBeforeReload = () async => true;           // hook pre-reload
 ```
 
-## Configuración requerida en el server
+---
 
-Para que el reload realmente traiga la versión nueva (y no la cacheada), estos archivos **no deben cachearse**. En Firebase Hosting:
+## Configuración requerida en Firebase Hosting
+
+Para que el reload traiga la versión nueva (y no la cacheada), hay dos cosas que configurar en `firebase.json`:
+
+### 1. Headers no-cache
+
+Los archivos críticos no deben cachearse en el browser ni en el service worker:
 
 ```json
 {
@@ -114,31 +137,113 @@ Para que el reload realmente traiga la versión nueva (y no la cacheada), estos 
     "headers": [
       {
         "source": "/version.json",
-        "headers": [
-          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
-        ]
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+      },
+      {
+        "source": "/manifest.json",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
       },
       {
         "source": "/index.html",
-        "headers": [
-          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
-        ]
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
       },
       {
         "source": "/flutter_service_worker.js",
-        "headers": [
-          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
-        ]
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
       },
       {
         "source": "/flutter_bootstrap.js",
-        "headers": [
-          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
-        ]
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+      },
+      {
+        "source": "/main.dart.js",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
       }
     ]
   }
 }
 ```
 
-Los assets con hash en el nombre (`main.dart.js`, fonts, imágenes del build) pueden cachearse normal — el service worker se encarga de invalidarlos cuando cambia `flutter_service_worker.js`.
+### 2. Rewrites — importante para `version.json`
+
+Firebase Hosting tiene un catch-all `**` → `index.html` para que funcione el router de Flutter. El problema es que eso también intercepta requests a `/version.json` y devuelve `index.html` en lugar del JSON real.
+
+Para evitarlo, declarás rutas explícitas **antes** del catch-all:
+
+```json
+{
+  "hosting": {
+    "rewrites": [
+      {
+        "source": "/version.json",
+        "destination": "/version.json"
+      },
+      {
+        "source": "/manifest.json",
+        "destination": "/manifest.json"
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}
+```
+
+> Firebase evalúa los rewrites en orden. Al poner `/version.json` primero, ese request llega al archivo real y no cae en el catch-all de Flutter.
+
+### `firebase.json` completo de referencia
+
+```json
+{
+  "hosting": {
+    "public": "build/web",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "headers": [
+      {
+        "source": "/version.json",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+      },
+      {
+        "source": "/manifest.json",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+      },
+      {
+        "source": "/index.html",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+      },
+      {
+        "source": "/flutter_service_worker.js",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+      },
+      {
+        "source": "/flutter_bootstrap.js",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+      },
+      {
+        "source": "/main.dart.js",
+        "headers": [{ "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }]
+      }
+    ],
+    "rewrites": [
+      {
+        "source": "/version.json",
+        "destination": "/version.json"
+      },
+      {
+        "source": "/manifest.json",
+        "destination": "/manifest.json"
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
+}
+```
